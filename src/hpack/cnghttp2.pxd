@@ -28,12 +28,13 @@ cdef extern from 'nghttp2/nghttp2.h':
 
     ctypedef enum nghttp2_error:
         NGHTTP2_ERR_NOMEM
-        NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE
         NGHTTP2_ERR_DEFERRED
 
     ctypedef enum nghttp2_nv_flag:
         NGHTTP2_NV_FLAG_NONE
         NGHTTP2_NV_FLAG_NO_INDEX
+        NGHTTP2_NV_FLAG_NO_COPY_NAME
+        NGHTTP2_NV_FLAG_NO_COPY_VALUE
 
     ctypedef struct nghttp2_nv:
         uint8_t *name
@@ -49,6 +50,8 @@ cdef extern from 'nghttp2/nghttp2.h':
 
     void nghttp2_hd_deflate_del(nghttp2_hd_deflater *deflater)
 
+    int nghttp2_hd_deflate_get_max_dynamic_table_size(nghttp2_hd_deflater *deflater)
+
     int nghttp2_hd_deflate_change_table_size(nghttp2_hd_deflater *deflater,
                                              size_t hd_table_bufsize_max)
 
@@ -62,6 +65,8 @@ cdef extern from 'nghttp2/nghttp2.h':
     int nghttp2_hd_inflate_new(nghttp2_hd_inflater **inflater_ptr)
 
     void nghttp2_hd_inflate_del(nghttp2_hd_inflater *inflater)
+
+    int nghttp2_hd_inflate_get_dynamic_table_size(nghttp2_hd_inflater *inflater)
 
     int nghttp2_hd_inflate_get_max_dynamic_table_size(nghttp2_hd_inflater *inflater)
 

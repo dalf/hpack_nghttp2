@@ -27,11 +27,14 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, int32_t
 import logging
 
-from .exceptions import HPACKError, HPACKDecodingError
+from .exceptions import HPACKError, HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError
 
 
 DEFAULT_HEADER_TABLE_SIZE = cnghttp2.NGHTTP2_DEFAULT_HEADER_TABLE_SIZE
 DEFLATE_MAX_HEADER_TABLE_SIZE = 4096
+# We default the maximum header list we're willing to accept to 64kB. That's a
+# lot of headers, but if applications want to raise it they can do.
+DEFAULT_MAX_HEADER_LIST_SIZE = 2 ** 16
 
 HD_ENTRY_OVERHEAD = 32
 
@@ -86,9 +89,10 @@ cdef class HDDeflater:
     def __cinit__(self, hd_table_bufsize_max = DEFLATE_MAX_HEADER_TABLE_SIZE):
         rv = cnghttp2.nghttp2_hd_deflate_new(&self._deflater,
                                              hd_table_bufsize_max)
+        if rv == cnghttp2.nghttp2_error.NGHTTP2_ERR_NOMEM:
+            raise MemoryError()
         if rv != 0:
-            # nghttp2_error.NGHTTP2_ERR_NOMEM : Out of memory
-            raise RuntimeError(_strerror(rv))
+            raise RuntimeError()
 
     def __dealloc__(self):
         cnghttp2.nghttp2_hd_deflate_del(self._deflater)
@@ -142,6 +146,10 @@ cdef class HDDeflater:
 
         return res
 
+    def get_table_size(self):
+        return cnghttp2.nghttp2_hd_deflate_get_max_dynamic_table_size(self._deflater)
+
+
     def change_table_size(self, hd_table_bufsize_max):
         '''Changes header table size to |hd_table_bufsize_max| byte.
 
@@ -167,6 +175,11 @@ cdef class HDDeflater:
             res.append(HDTableEntry(k, nv.namelen, v, nv.valuelen))
         return res
 
+
+cdef table_entry_size(cnghttp2.nghttp2_nv nv):
+    return HD_ENTRY_OVERHEAD + nv.namelen + nv.valuelen
+
+
 cdef class HDInflater:
     '''Performs header decompression.
 
@@ -180,12 +193,15 @@ cdef class HDInflater:
     '''
 
     cdef cnghttp2.nghttp2_hd_inflater *_inflater
+    cdef int max_header_list_size
 
-    def __cinit__(self):
+    def __cinit__(self, max_header_list_size = DEFAULT_MAX_HEADER_LIST_SIZE):
+        self.max_header_list_size = max_header_list_size
         rv = cnghttp2.nghttp2_hd_inflate_new(&self._inflater)
+        if rv == cnghttp2.nghttp2_error.NGHTTP2_ERR_NOMEM:
+            raise MemoryError()
         if rv != 0:
-            # nghttp2_error.NGHTTP2_ERR_NOMEM : Out of memory
-            raise RuntimeError(_strerror(rv))
+            raise RuntimeError()
 
     def __dealloc__(self):
         cnghttp2.nghttp2_hd_inflate_del(self._inflater)
@@ -215,14 +231,18 @@ cdef class HDInflater:
                 res.append((nv.name[:nv.namelen], nv.value[:nv.valuelen]))
             if inflate_flags & cnghttp2.NGHTTP2_HD_INFLATE_FINAL:
                 break
+            if table_entry_size(nv) > self.max_header_list_size:
+                raise OversizedHeaderListError()
 
         cnghttp2.nghttp2_hd_inflate_end_headers(self._inflater)
         return res
 
-    def get_table_size(self):
+    @property
+    def header_table_size(self):
         return cnghttp2.nghttp2_hd_inflate_get_max_dynamic_table_size(self._inflater)
 
-    def change_table_size(self, hd_table_bufsize_max):
+    @header_table_size.setter
+    def header_table_size(self, hd_table_bufsize_max):
         '''Changes header table size to |hd_table_bufsize_max| byte.
 
         An exception will be raised on error.
@@ -232,7 +252,7 @@ cdef class HDInflater:
         rv = cnghttp2.nghttp2_hd_inflate_change_table_size(self._inflater,
                                                            hd_table_bufsize_max)
         if rv != 0:
-            raise Exception(_strerror(rv))
+            raise InvalidTableSizeError(_strerror(rv))
 
     def get_hd_table(self):
         '''Returns copy of current dynamic header table.'''
