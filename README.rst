@@ -21,10 +21,7 @@ Warning: it will replace the existing the hpack module
 Not implemented
 ---------------
 
-- hpack.Decoder.max_header_list_size : the value is ignored
-- hpack.Encoder.header_table_size : raise NotImplementedError
 - hpack.exceptions.InvalidTableIndex : never raised
-- hpack.exceptions.OversizedHeaderListError : never raised
 - hpack.exceptions.InvalidTableSizeError : never raised
 
 
