@@ -7,6 +7,11 @@ It requires Cython because nghttp2pyx_ requires some updates:
 - to raise `hpack.exceptions.*` instead of a generic `Exception`
 - to handle the sentive flag
 
+About speed:
+
+* the encoder is about 20 times faster
+* the decoder is about 10 times faster
+
 
 How to install
 --------------

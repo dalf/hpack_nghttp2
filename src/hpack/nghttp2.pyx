@@ -27,6 +27,7 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, int32_t
 import logging
 
+from .struct import HeaderTuple
 from .exceptions import HPACKError, HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError
 
 
@@ -38,30 +39,78 @@ DEFAULT_MAX_HEADER_LIST_SIZE = 2 ** 16
 
 HD_ENTRY_OVERHEAD = 32
 
-class HDTableEntry:
 
-    def __init__(self, name, namelen, value, valuelen):
-        self.name = name
-        self.namelen = namelen
-        self.value = value
-        self.valuelen = valuelen
-
-    def space(self):
-        return self.namelen + self.valuelen + HD_ENTRY_OVERHEAD
-
-cdef class Entry:
+cdef class HDTableEntry:
     cdef public bytes name, value
     cdef public int flags
 
-    def __init__(self, name, value, sentive):
+    def __cinit__(self, bytes name, bytes value, int flags):
         self.name = name
         self.value = value
-        self.flags = cnghttp2.NGHTTP2_NV_FLAG_NO_INDEX if sentive else cnghttp2.NGHTTP2_NV_FLAG_NONE
+        self.flags = flags
+
+    def space(self):
+        return len(self.name) + len(self.value) + HD_ENTRY_OVERHEAD
+
+
+cdef _strerror(int liberror_code):
+    return cnghttp2.nghttp2_strerror(liberror_code).decode('utf-8')
+
+
+cpdef bytes _to_bytes(string):
+    """
+    Convert string to bytes.
+    """
+    if not isinstance(string, (str, bytes)):
+        string = str(string)
+
+    return string if isinstance(string, bytes) else string.encode('utf-8')
+
+
+def _dict_to_iterable(header_dict):
+    """
+    This converts a dictionary to an iterable of two-tuples. This is a
+    HPACK-specific function because it pulls "special-headers" out first and
+    then emits them.
+    """
+    assert isinstance(header_dict, dict)
+    keys = sorted(
+        header_dict.keys(),
+        key=lambda k: not _to_bytes(k).startswith(b':')
+    )
+    for key in keys:
+        yield key, header_dict[key]
+
+
+cdef _get_tableentries(headers):
+    # Turn the headers into a list of tuples if possible. This is the
+    # natural way to interact with them in HPACK.
+    if isinstance(headers, dict):
+        headers = _dict_to_iterable(headers)
+
+    params = []
+    for header in headers:
+        sensitive = False
+        if isinstance(header, HeaderTuple):
+            sensitive = not header.indexable
+        elif len(header) > 2:
+            sensitive = header[2]
+        name = _to_bytes(header[0])
+        value = _to_bytes(header[1])
+        flags = cnghttp2.NGHTTP2_NV_FLAG_NO_INDEX if sensitive else cnghttp2.NGHTTP2_NV_FLAG_NONE
+        params.append(HDTableEntry(name, value, flags))
+    return params
+
 
 cdef _get_pybytes(uint8_t *b, uint16_t blen):
     return b[:blen]
 
-cdef class HDDeflater:
+
+cdef table_entry_size(cnghttp2.nghttp2_nv nv):
+    return HD_ENTRY_OVERHEAD + nv.namelen + nv.valuelen
+
+
+cdef class Encoder:
     '''Performs header compression. The constructor takes
     |hd_table_bufsize_max| parameter, which limits the usage of header
     table in the given amount of bytes. This is necessary because the
@@ -97,7 +146,7 @@ cdef class HDDeflater:
     def __dealloc__(self):
         cnghttp2.nghttp2_hd_deflate_del(self._deflater)
 
-    def deflate(self, headers):
+    def encode(self, headers, huffman=True):
         '''Compresses the |headers|. The |headers| must be sequence of tuple
         of name/value pair, which are sequence of bytes (not unicode
         string).
@@ -106,17 +155,24 @@ cdef class HDDeflater:
         An exception will be raised on error.
 
         '''
+        if not huffman:
+            raise NotImplementedError('huffman=False is not implemented')
+
+        headers = _get_tableentries(headers)
+
+        #
         cdef cnghttp2.nghttp2_nv *nva = <cnghttp2.nghttp2_nv*>\
                                         malloc(sizeof(cnghttp2.nghttp2_nv)*\
                                         len(headers))
         cdef cnghttp2.nghttp2_nv *nvap = nva
 
-        for entry in headers:
-            nvap[0].name = entry.name
-            nvap[0].namelen = len(entry.name)
-            nvap[0].value = entry.value
-            nvap[0].valuelen = len(entry.value)
-            nvap[0].flags = entry.flags
+        # Next, walk across the headers and turn them all into bytestrings.
+        for e in headers:
+            nvap[0].name = e.name
+            nvap[0].namelen = len(e.name)
+            nvap[0].value = e.value
+            nvap[0].valuelen = len(e.value)
+            nvap[0].flags = e.flags
             nvap += 1
 
         cdef size_t outcap = 0
@@ -146,16 +202,19 @@ cdef class HDDeflater:
 
         return res
 
-    def get_table_size(self):
+    @property
+    def header_table_size(self):
         return cnghttp2.nghttp2_hd_deflate_get_max_dynamic_table_size(self._deflater)
 
 
-    def change_table_size(self, hd_table_bufsize_max):
-        '''Changes header table size to |hd_table_bufsize_max| byte.
-
-        An exception will be raised on error.
-
-        '''
+    @header_table_size.setter
+    def header_table_size(self, hd_table_bufsize_max):
+        """
+        see https://nghttp2.org/documentation/nghttp2_hd_deflate_change_table_size.html :
+        The deflater never uses more memory than max_deflate_dynamic_table_size bytes specified in
+        nghttp2_hd_deflate_new(). Therefore, if settings_max_dynamic_table_size > max_deflate_dynamic_table_size,
+        resulting maximum table size becomes max_deflate_dynamic_table_size.
+        """
         cdef int rv
         rv = cnghttp2.nghttp2_hd_deflate_change_table_size(self._deflater,
                                                            hd_table_bufsize_max)
@@ -172,15 +231,11 @@ cdef class HDDeflater:
             nv = cnghttp2.nghttp2_hd_deflate_get_table_entry(self._deflater, i)
             k = _get_pybytes(nv.name, nv.namelen)
             v = _get_pybytes(nv.value, nv.valuelen)
-            res.append(HDTableEntry(k, nv.namelen, v, nv.valuelen))
+            res.append(HDTableEntry(k, v))
         return res
 
 
-cdef table_entry_size(cnghttp2.nghttp2_nv nv):
-    return HD_ENTRY_OVERHEAD + nv.namelen + nv.valuelen
-
-
-cdef class HDInflater:
+cdef class Decoder:
     '''Performs header decompression.
 
     The following example shows how to compress request header sets:
@@ -193,20 +248,22 @@ cdef class HDInflater:
     '''
 
     cdef cnghttp2.nghttp2_hd_inflater *_inflater
-    cdef int max_header_list_size
+    cdef public int max_header_list_size
+    cdef public int max_allowed_table_size
 
-    def __cinit__(self, max_header_list_size = DEFAULT_MAX_HEADER_LIST_SIZE):
-        self.max_header_list_size = max_header_list_size
+    def __init__(self, max_header_list_size = DEFAULT_MAX_HEADER_LIST_SIZE):
         rv = cnghttp2.nghttp2_hd_inflate_new(&self._inflater)
         if rv == cnghttp2.nghttp2_error.NGHTTP2_ERR_NOMEM:
             raise MemoryError()
         if rv != 0:
             raise RuntimeError()
+        self.max_header_list_size = max_header_list_size
+        self.max_allowed_table_size = self.header_table_size         
 
     def __dealloc__(self):
         cnghttp2.nghttp2_hd_inflate_del(self._inflater)
 
-    def inflate(self, data):
+    def decode(self, data, raw=False):
         '''Decompresses the compressed header block |data|. The |data| must be
         byte string (not unicode string).
 
@@ -235,7 +292,14 @@ cdef class HDInflater:
                 raise OversizedHeaderListError()
 
         cnghttp2.nghttp2_hd_inflate_end_headers(self._inflater)
-        return res
+
+        # decode
+        if raw:
+            return res
+        try:
+            return [HeaderTuple(n.decode('utf-8'), v.decode('utf-8')) for n, v in res]
+        except UnicodeDecodeError:
+            raise HPACKDecodingError("Unable to decode headers as UTF-8.")
 
     @property
     def header_table_size(self):
@@ -243,11 +307,6 @@ cdef class HDInflater:
 
     @header_table_size.setter
     def header_table_size(self, hd_table_bufsize_max):
-        '''Changes header table size to |hd_table_bufsize_max| byte.
-
-        An exception will be raised on error.
-
-        '''
         cdef int rv
         rv = cnghttp2.nghttp2_hd_inflate_change_table_size(self._inflater,
                                                            hd_table_bufsize_max)
@@ -264,11 +323,9 @@ cdef class HDInflater:
             nv = cnghttp2.nghttp2_hd_inflate_get_table_entry(self._inflater, i)
             k = _get_pybytes(nv.name, nv.namelen)
             v = _get_pybytes(nv.value, nv.valuelen)
-            res.append(HDTableEntry(k, nv.namelen, v, nv.valuelen))
+            res.append(HDTableEntry(k, v))
         return res
 
-cdef _strerror(int liberror_code):
-    return cnghttp2.nghttp2_strerror(liberror_code).decode('utf-8')
 
 def print_hd_table(hdtable):
     '''Convenient function to print |hdtable| to the standard output. This

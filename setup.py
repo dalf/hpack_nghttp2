@@ -20,6 +20,9 @@ with open(os.path.join(PROJECT_ROOT, 'src/hpack/__init__.py')) as file_:
     else:
         raise RuntimeError("No version number found!")
 
+# ???
+# https://stackoverflow.com/questions/41778153/compiling-an-optional-cython-extension-only-when-possible-in-setup-py
+# Extension(...., optional = True)
 extensions = [
     Extension(
         'hpack.nghttp2', 
