@@ -21,3 +21,10 @@ from .nghttp2 import (
     Encoder,
     Decoder,
 )
+
+__all__ = [
+    '_to_bytes',
+    '_dict_to_iterable',
+    'Encoder',
+    'Decoder',
+]

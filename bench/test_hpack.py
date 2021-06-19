@@ -25,13 +25,13 @@ def load_cases():
 
 cases = load_cases()
 e = Encoder()
-encoded_cases = [e.encode(headers) for headers in cases]
+encoded_cases = [Encoder().encode(headers) for headers in cases]
 
 class TestHpackEncoder:
     def test_encode(self, benchmark):
-        e = Encoder()
         def f():
             for headers in cases:
+                e = Encoder()
                 e.encode(headers)
 
         benchmark(f)
@@ -39,9 +39,9 @@ class TestHpackEncoder:
 
 class TestHpackDecoder:
     def test_decode(self, benchmark):
-        d = Decoder()
         def f():
             for data in encoded_cases:
+                d = Decoder()
                 d.decode(data)
 
         benchmark(f)

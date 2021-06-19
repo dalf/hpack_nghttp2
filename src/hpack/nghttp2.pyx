@@ -53,6 +53,12 @@ cdef class HDTableEntry:
         return len(self.name) + len(self.value) + HD_ENTRY_OVERHEAD
 
 
+cdef HDTableEntry nv_to_hdtableentry(const cnghttp2.nghttp2_nv *nv):
+    k = _get_pybytes(nv.name, nv.namelen)
+    v = _get_pybytes(nv.value, nv.valuelen)
+    return HDTableEntry(k, v, nv.flags)
+
+
 cdef _strerror(int liberror_code):
     return cnghttp2.nghttp2_strerror(liberror_code).decode('utf-8')
 
@@ -229,9 +235,7 @@ cdef class Encoder:
         res = []
         for i in range(62, length + 1):
             nv = cnghttp2.nghttp2_hd_deflate_get_table_entry(self._deflater, i)
-            k = _get_pybytes(nv.name, nv.namelen)
-            v = _get_pybytes(nv.value, nv.valuelen)
-            res.append(HDTableEntry(k, v))
+            res.append(nv_to_hdtableentry(nv))
         return res
 
 
@@ -321,9 +325,7 @@ cdef class Decoder:
         res = []
         for i in range(62, length + 1):
             nv = cnghttp2.nghttp2_hd_inflate_get_table_entry(self._inflater, i)
-            k = _get_pybytes(nv.name, nv.namelen)
-            v = _get_pybytes(nv.value, nv.valuelen)
-            res.append(HDTableEntry(k, v))
+            res.append(nv_to_hdtableentry(nv))
         return res
 
 
@@ -338,7 +340,8 @@ def print_hd_table(hdtable):
     idx = 0
     for entry in hdtable:
         idx += 1
-        print('[{}] (s={}) {}: {}'\
+        print('[{}] (s={}) {}: {} {}'\
               .format(idx, entry.space(),
                       entry.name.decode('utf-8'),
-                      entry.value.decode('utf-8')))
+                      entry.value.decode('utf-8'),
+                      entry.flags))
